@@ -28,6 +28,7 @@ log = logging.getLogger("workana-bot")
 
 
 def _escape_md(text: str) -> str:
+    text = text.replace("\u2014", "-").replace("\u2013", "-")
     for ch in ("\\", "_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"):
         text = text.replace(ch, f"\\{ch}")
     return text
@@ -54,7 +55,7 @@ def _format_client_section(job: WorkanaJob) -> str:
     if not job.client_name and job.published_projects is None:
         return ""
 
-    lines: list[str] = ["\n----------*Client*------------"]
+    lines: list[str] = ["\n*Client*"]
     if job.client_name:
         flag = _country_flag_emoji(job.client_country_code)
         rating = (
