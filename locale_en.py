@@ -143,7 +143,7 @@ def english_published(raw: str) -> str:
 def english_last_reply(raw: str) -> str:
     relative = english_relative_time(raw)
     if not relative:
-        return ""
+        return "Last reply: —"
     return f"Last reply: {relative}"
 
 

@@ -42,11 +42,19 @@ def _country_flag_emoji(code: str) -> str:
     )
 
 
+def _format_country(job: WorkanaJob) -> str:
+    label = _escape_md(english_country(job.country))
+    flag = _country_flag_emoji(job.client_country_code)
+    if flag:
+        return f"{flag} {label}"
+    return f"🌎 {label}"
+
+
 def _format_client_section(job: WorkanaJob) -> str:
     if not job.client_name and job.published_projects is None:
         return ""
 
-    lines: list[str] = ["\n*Client*"]
+    lines: list[str] = ["\n----------*Client*------------"]
     if job.client_name:
         flag = _country_flag_emoji(job.client_country_code)
         rating = (
@@ -54,11 +62,14 @@ def _format_client_section(job: WorkanaJob) -> str:
             if job.client_rating is not None
             else "—"
         )
-        location = job.country or job.client_country_code or "—"
-        prefix = f"{flag} " if flag else "🌎 "
+        location = _format_country(job) if job.country else (
+            f"{flag} {_escape_md(job.client_country_code)}"
+            if flag
+            else f"🌎 {_escape_md(job.client_country_code or '—')}"
+        )
         lines.append(
             f"👤 {_escape_md(job.client_name)} · ⭐ {_escape_md(rating)} · "
-            f"{prefix}{_escape_md(location)}"
+            f"{location}"
         )
 
     stats: list[str] = []
@@ -85,7 +96,6 @@ def _format_client_section(job: WorkanaJob) -> str:
 def format_job_message(job: WorkanaJob) -> str:
     budget = _escape_md(english_budget(job.budget))
     published = _escape_md(english_published(job.published))
-    country = _escape_md(english_country(job.country))
     skills = _escape_md(", ".join(job.skills[:8]) if job.skills else "—")
     snippet = _escape_md(job.description_snippet)
     flags: list[str] = []
@@ -95,11 +105,12 @@ def format_job_message(job: WorkanaJob) -> str:
         flags.append("verified payment")
     flag_line = f"\n🏷 {_escape_md(' · '.join(flags))}" if flags else ""
     client_block = _format_client_section(job)
-    last_reply = english_last_reply(job.last_reply)
-    meta_parts = [f"📅 {published}"]
-    if last_reply:
-        meta_parts.append(f"💬 {_escape_md(last_reply)}")
-    meta_parts.append(f"🌎 {country}")
+    last_reply = _escape_md(english_last_reply(job.last_reply))
+    meta_parts = [
+        f"📅 {published}",
+        f"💬 {last_reply}",
+        _format_country(job),
+    ]
     meta_line = " · ".join(meta_parts)
 
     return (

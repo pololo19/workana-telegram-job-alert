@@ -103,6 +103,11 @@ def _country_name(country_html: str) -> str:
     return match.group(1).strip() if match else ""
 
 
+def _country_code(country_html: str) -> str:
+    match = COUNTRY_FLAG_RE.search(country_html or "")
+    return match.group(1).upper() if match else ""
+
+
 def _description_snippet(description: str, limit: int = 280) -> str:
     text = re.sub(r"<br\s*/?>", "\n", description or "", flags=re.IGNORECASE)
     text = re.sub(r"<[^>]+>", "", text)
@@ -161,6 +166,7 @@ def _parse_job_sidebar(page_html: str) -> dict[str, Any]:
 def _job_from_result(item: dict[str, Any]) -> WorkanaJob:
     slug = item["slug"]
     skills = tuple(s.get("anchorText", "") for s in item.get("skills") or [])
+    country_html = item.get("country", "")
     return WorkanaJob(
         slug=slug,
         title=_plain_title(item.get("title", slug)),
@@ -168,7 +174,8 @@ def _job_from_result(item: dict[str, Any]) -> WorkanaJob:
         budget=(item.get("budget") or "").strip(),
         published=(item.get("publishedDate") or item.get("postedDate") or "").strip(),
         bids=_parse_bids(item.get("totalBids", "")),
-        country=_country_name(item.get("country", "")),
+        country=_country_name(country_html),
+        client_country_code=_country_code(country_html),
         skills=skills,
         is_urgent=bool(item.get("isUrgent")),
         verified_payment=bool(item.get("hasVerifiedPaymentMethod")),
