@@ -10,6 +10,8 @@ from typing import Any
 
 import httpx
 
+from locale_en import english_member_since, normalize_stat_label
+
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -36,7 +38,10 @@ STARS_WIDTH_RE = re.compile(
     re.IGNORECASE,
 )
 COUNTRY_FLAG_RE = re.compile(r'flag flag-([a-z]{2})', re.IGNORECASE)
-MEMBER_SINCE_RE = re.compile(r"<p>Member since:\s*([^<]+)</p>", re.IGNORECASE)
+MEMBER_SINCE_RE = re.compile(
+    r"<p>(?:Member since|Miembro desde|Membro desde):\s*([^<]+)</p>",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -59,6 +64,7 @@ class WorkanaJob:
     projects_paid: int | None = None
     member_since: str = ""
     interested_freelancers: int | None = None
+    last_reply: str = ""
 
     def matches_keywords(self, keywords: list[str]) -> bool:
         if not keywords:
@@ -122,7 +128,8 @@ def _rating_from_listing(raw: Any) -> float | None:
 def _sidebar_stats(page_html: str) -> dict[str, int]:
     stats: dict[str, int] = {}
     for match in SIDEBAR_STAT_RE.finditer(page_html):
-        stats[match.group(2).strip().lower()] = int(match.group(1))
+        label = normalize_stat_label(match.group(2))
+        stats[label] = int(match.group(1))
     return stats
 
 
@@ -143,7 +150,9 @@ def _parse_job_sidebar(page_html: str) -> dict[str, Any]:
         "client_country_code": (flag_match.group(1).upper() if flag_match else ""),
         "published_projects": stats.get("published projects"),
         "projects_paid": stats.get("projects paid"),
-        "member_since": member_match.group(1).strip() if member_match else "",
+        "member_since": english_member_since(
+            member_match.group(1).strip() if member_match else ""
+        ),
         "bids": stats.get("bids"),
         "interested_freelancers": stats.get("interested freelancers"),
     }
@@ -166,6 +175,7 @@ def _job_from_result(item: dict[str, Any]) -> WorkanaJob:
         description_snippet=_description_snippet(item.get("description", "")),
         client_name=(item.get("authorName") or "").strip(),
         client_rating=_rating_from_listing(item.get("rating")),
+        last_reply=(item.get("lastEmployerMessage") or "").strip(),
     )
 
 

@@ -9,6 +9,13 @@ from telegram.constants import ParseMode
 from telegram.error import TelegramError
 
 from config import Settings
+from locale_en import (
+    english_budget,
+    english_country,
+    english_last_reply,
+    english_member_since,
+    english_published,
+)
 from storage import SeenJobStore
 from workana import WorkanaJob, enrich_job_from_detail, fetch_recent_jobs
 
@@ -62,7 +69,9 @@ def _format_client_section(job: WorkanaJob) -> str:
     if stats:
         lines.append(f"📊 {_escape_md(' · '.join(stats))}")
     if job.member_since:
-        lines.append(f"📆 Member since: {_escape_md(job.member_since)}")
+        lines.append(
+            f"📆 Member since: {_escape_md(english_member_since(job.member_since))}"
+        )
 
     activity: list[str] = [f"{job.bids} bids"]
     if job.interested_freelancers is not None:
@@ -74,9 +83,9 @@ def _format_client_section(job: WorkanaJob) -> str:
 
 
 def format_job_message(job: WorkanaJob) -> str:
-    budget = _escape_md(job.budget or "—")
-    published = _escape_md(job.published or "—")
-    country = _escape_md(job.country or "—")
+    budget = _escape_md(english_budget(job.budget))
+    published = _escape_md(english_published(job.published))
+    country = _escape_md(english_country(job.country))
     skills = _escape_md(", ".join(job.skills[:8]) if job.skills else "—")
     snippet = _escape_md(job.description_snippet)
     flags: list[str] = []
@@ -86,12 +95,18 @@ def format_job_message(job: WorkanaJob) -> str:
         flags.append("verified payment")
     flag_line = f"\n🏷 {_escape_md(' · '.join(flags))}" if flags else ""
     client_block = _format_client_section(job)
+    last_reply = english_last_reply(job.last_reply)
+    meta_parts = [f"📅 {published}"]
+    if last_reply:
+        meta_parts.append(f"💬 {_escape_md(last_reply)}")
+    meta_parts.append(f"🌎 {country}")
+    meta_line = " · ".join(meta_parts)
 
     return (
         f"🆕 *New Workana job*\n\n"
         f"*{_escape_md(job.title)}*\n"
         f"💰 {budget}\n"
-        f"📅 {published} · 🌎 {country}\n"
+        f"{meta_line}\n"
         f"🛠 {skills}{flag_line}"
         f"{client_block}\n"
         f"{snippet}"
