@@ -168,6 +168,8 @@ async def poll_loop(settings: Settings) -> None:
         WorkanaFetchConfig(
             use_playwright=settings.workana_use_playwright,
             playwright_fallback=settings.workana_playwright_fallback,
+            remote_fetch_url=settings.workana_remote_fetch_url,
+            remote_fetch_secret=settings.workana_remote_fetch_secret,
             proxy=settings.workana_proxy,
         )
     )
@@ -181,7 +183,12 @@ async def poll_loop(settings: Settings) -> None:
     else:
         log.info("Workana URL: %s", settings.workana_jobs_url)
     log.info("Poll every %s seconds", settings.poll_interval_seconds)
-    if settings.workana_use_playwright:
+    if settings.workana_remote_fetch_url:
+        log.info(
+            "Workana fetch: home PC bridge at %s",
+            settings.workana_remote_fetch_url,
+        )
+    elif settings.workana_use_playwright:
         log.info("Workana fetch: headless Chromium (Playwright)")
     elif settings.workana_playwright_fallback:
         log.info("Workana fetch: curl/httpx, then Playwright if blocked")

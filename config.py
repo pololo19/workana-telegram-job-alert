@@ -59,6 +59,8 @@ class Settings:
     max_bids: int | None
     workana_use_playwright: bool
     workana_playwright_fallback: bool
+    workana_remote_fetch_url: str | None
+    workana_remote_fetch_secret: str | None
     workana_proxy: str | None
     data_dir: Path
 
@@ -86,6 +88,10 @@ class Settings:
         data_dir.mkdir(exist_ok=True)
 
         proxy = os.environ.get("WORKANA_PROXY", "").strip() or None
+        remote_url = os.environ.get("WORKANA_REMOTE_FETCH_URL", "").strip() or None
+        remote_secret = (
+            os.environ.get("WORKANA_REMOTE_FETCH_SECRET", "").strip() or None
+        )
 
         return cls(
             telegram_bot_token=token,
@@ -100,6 +106,8 @@ class Settings:
             workana_playwright_fallback=_parse_bool(
                 os.environ.get("WORKANA_PLAYWRIGHT_FALLBACK")
             ),
+            workana_remote_fetch_url=remote_url,
+            workana_remote_fetch_secret=remote_secret,
             workana_proxy=proxy,
             data_dir=data_dir,
         )

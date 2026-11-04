@@ -126,6 +126,35 @@ Do **not** copy the Windows `.venv` folder to the server. Upload the project (gi
    - If Playwright **times out** or listing data never appears, the VPS IP is likely blocked permanently. Use a **residential** `WORKANA_PROXY`, run the bot on your **home PC**, or change VPS region/provider.
    - With `WORKANA_USE_PLAYWRIGHT=true`, the bot still tries **curl first** when that works (faster than Chromium).
    - Alternative: set `WORKANA_PROXY` to a **residential** HTTP proxy and keep `WORKANA_USE_PLAYWRIGHT=false`.
+
+6. **VPS + home PC (recommended when Workana works only at home)**
+
+   Workana blocks many VPS IPs; your **Windows PC is fine**. Keep the bot on the VPS for uptime, but fetch pages from home:
+
+   1. Install [Tailscale](https://tailscale.com) on **both** machines (private `100.x.x.x` addresses).
+   2. On **Windows** (same folder as the bot), pick a long random secret and run:
+
+      ```powershell
+      $env:WORKANA_REMOTE_FETCH_SECRET = "paste-a-long-random-secret"
+      $env:WORKANA_FETCH_BRIDGE_HOST = "0.0.0.0"
+      python fetch_bridge.py
+      ```
+
+      Leave this window open (or run as a scheduled task).
+
+   3. On the **VPS** `.env`:
+
+      ```env
+      WORKANA_REMOTE_FETCH_URL=http://100.x.x.x:8765
+      WORKANA_REMOTE_FETCH_SECRET=paste-a-long-random-secret
+      WORKANA_USE_PLAYWRIGHT=false
+      ```
+
+      Use your PC’s Tailscale IP instead of `100.x.x.x`.
+
+   4. Start the bot on the VPS. Logs should show `Workana fetch: home PC bridge`.
+
+   The bridge only accepts `workana.com` URLs and requires the bearer secret.
    - Persisted state lives in `data/seen_jobs.json` — back it up if you rebuild the VPS so you do not get duplicate “new job” floods.
 
 ## Filters

@@ -18,7 +18,14 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-from locale_en import english_member_since, normalize_stat_label
+from locale_en import (
+    english_budget,
+    english_country,
+    english_last_reply,
+    english_member_since,
+    english_published,
+    normalize_stat_label,
+)
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -264,6 +271,8 @@ CURL_HEADERS = {**DEFAULT_HEADERS, "Accept-Encoding": "gzip, deflate"}
 class WorkanaFetchConfig:
     use_playwright: bool = False
     playwright_fallback: bool = False
+    remote_fetch_url: str | None = None
+    remote_fetch_secret: str | None = None
     proxy: str | None = None
 
 
@@ -379,8 +388,142 @@ async def _fetch_html_via_httpx(url: str, *, proxy: str | None = None) -> str:
         return response.text
 
 
+def _listing_has_dom_cards(page_html: str) -> bool:
+    return 'class="project-item' in page_html
+
+
 def _listing_html_ready(page_html: str) -> bool:
-    return "results-initials" in page_html and not _is_cloudflare_challenge(page_html)
+    if _is_cloudflare_challenge(page_html):
+        return False
+    if "results-initials" in page_html:
+        return True
+    return _listing_has_dom_cards(page_html)
+
+
+def _dom_plain_text(fragment: str) -> str:
+    text = re.sub(r"<br\s*/?>", "\n", fragment, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", " ", text)
+    return html.unescape(re.sub(r"\s+", " ", text)).strip()
+
+
+def _dom_first(pattern: re.Pattern[str], block: str, group: int = 1) -> str:
+    match = pattern.search(block)
+    return match.group(group).strip() if match else ""
+
+
+_DOM_JOB_HREF_RE = re.compile(
+    r'href="(?:https://www\.workana\.com)?/job/([^"#?]+)"',
+    re.IGNORECASE,
+)
+_DOM_TITLE_RE = re.compile(
+    r'class="h3 project-title"[^>]*>.*?title="([^"]+)"',
+    re.DOTALL | re.IGNORECASE,
+)
+_DOM_BUDGET_RE = re.compile(r'class="values"[^>]*>([^<]+)', re.IGNORECASE)
+_DOM_BIDS_RE = re.compile(
+    r'class="bids"[^>]*>.*?(?:Propuestas|Bids|Propostas)\s*:\s*(\d+)',
+    re.DOTALL | re.IGNORECASE,
+)
+_DOM_DATE_RE = re.compile(
+    r'class="date"[^>]*>(?:\s*<[^>]+>)*\s*([^<]+)',
+    re.DOTALL | re.IGNORECASE,
+)
+_DOM_DESC_RE = re.compile(
+    r'class="text-expander-content"[^>]*>(.*?)</p>',
+    re.DOTALL | re.IGNORECASE,
+)
+_DOM_SKILL_RE = re.compile(
+    r'class="skill label[^"]*"[^>]*>([^<]+)',
+    re.IGNORECASE,
+)
+_DOM_CLIENT_RE = re.compile(
+    r'class="author-info user-name"[^>]*>.*?<span>([^<]+)</span>',
+    re.DOTALL | re.IGNORECASE,
+)
+_DOM_COUNTRY_RE = re.compile(
+    r'class="country-name"[^>]*>.*?>([^<]+)<',
+    re.DOTALL | re.IGNORECASE,
+)
+_DOM_FLAG_RE = re.compile(r'class="flag flag-([a-z]{2})', re.IGNORECASE)
+_DOM_STARS_RE = re.compile(
+    r'class="stars-fill"[^>]*style="width:\s*([\d.]+)%',
+    re.IGNORECASE,
+)
+_DOM_LAST_REPLY_RE = re.compile(
+    r'class="message-created"[^>]*>.*?<span>([^<]+)</span>\s*<span>([^<]+)</span>',
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _job_from_dom_block(block: str) -> WorkanaJob | None:
+    slug = _dom_first(_DOM_JOB_HREF_RE, block)
+    if not slug:
+        return None
+
+    title = html.unescape(_dom_first(_DOM_TITLE_RE, block) or slug)
+    budget_raw = _dom_plain_text(_dom_first(_DOM_BUDGET_RE, block))
+    bids_match = _DOM_BIDS_RE.search(block)
+    bids = int(bids_match.group(1)) if bids_match else 0
+
+    published_raw = _dom_plain_text(_dom_first(_DOM_DATE_RE, block))
+    published = english_published(published_raw) if published_raw else ""
+
+    desc_html = _DOM_DESC_RE.search(block)
+    description_snippet = _description_snippet(
+        _dom_plain_text(desc_html.group(1)) if desc_html else ""
+    )
+
+    skills = tuple(m.group(1).strip() for m in _DOM_SKILL_RE.finditer(block))
+    client_name = html.unescape(_dom_first(_DOM_CLIENT_RE, block))
+    country_raw = html.unescape(_dom_first(_DOM_COUNTRY_RE, block))
+    country = english_country(country_raw) if country_raw else ""
+
+    flag_match = _DOM_FLAG_RE.search(block)
+    client_country_code = flag_match.group(1).upper() if flag_match else ""
+
+    rating: float | None = None
+    stars_match = _DOM_STARS_RE.search(block)
+    if stars_match:
+        rating = float(stars_match.group(1)) / 100 * 5
+
+    last_reply = ""
+    reply_match = _DOM_LAST_REPLY_RE.search(block)
+    if reply_match:
+        last_reply = english_last_reply(reply_match.group(2).strip())
+
+    budget = english_budget(budget_raw) if budget_raw else ""
+
+    return WorkanaJob(
+        slug=slug,
+        title=title,
+        url=f"https://www.workana.com/job/{slug}",
+        budget=budget,
+        published=published,
+        bids=bids,
+        country=country,
+        skills=skills,
+        is_urgent="label-urgent" in block.lower() or "urgent" in block[:500].lower(),
+        verified_payment="payment-verified" in block,
+        description_snippet=description_snippet,
+        client_name=client_name,
+        client_rating=rating,
+        client_country_code=client_country_code,
+        last_reply=last_reply,
+    )
+
+
+def _parse_jobs_from_dom_html(page_html: str) -> list[WorkanaJob]:
+    chunks = re.split(r"(?=<div class=\"project-item\b)", page_html, flags=re.IGNORECASE)
+    jobs: list[WorkanaJob] = []
+    seen: set[str] = set()
+    for chunk in chunks:
+        if "project-item" not in chunk[:80].lower():
+            continue
+        job = _job_from_dom_block(chunk)
+        if job and job.slug not in seen:
+            seen.add(job.slug)
+            jobs.append(job)
+    return jobs
 
 
 def _wait_for_playwright_content(
@@ -399,9 +542,10 @@ def _wait_for_playwright_content(
         now = time.monotonic()
         if now - last_log >= 20:
             log.info(
-                "Playwright waiting for Workana (cloudflare=%s, listing_json=%s)",
+                "Playwright waiting for Workana (cloudflare=%s, listing_json=%s, dom_cards=%s)",
                 _is_cloudflare_challenge(content),
                 "results-initials" in content,
+                _listing_has_dom_cards(content),
             )
             last_log = now
         page.wait_for_timeout(2500)
@@ -413,7 +557,7 @@ def _wait_for_playwright_content(
             f"{int(timeout_sec)}s on this server IP. Use a residential "
             "WORKANA_PROXY, run the bot on a home PC, or try another VPS region."
         )
-    if jobs_listing and "results-initials" not in content:
+    if jobs_listing and not _listing_html_ready(content):
         raise RuntimeError(
             "Workana loaded in Chromium but job listing data never appeared "
             f"(waited {int(timeout_sec)}s). Datacenter IPs are often blocked — "
@@ -486,9 +630,19 @@ def _parse_jobs_page(page_html: str) -> list[WorkanaJob]:
         )
     try:
         payload = _extract_results_json(page_html)
-    except ValueError as exc:
+        results = payload.get("results") or []
+        return [_job_from_result(item) for item in results]
+    except ValueError:
+        dom_jobs = _parse_jobs_from_dom_html(page_html)
+        if dom_jobs:
+            log.info(
+                "Parsed %s jobs from listing page DOM (Vue render, no JSON embed)",
+                len(dom_jobs),
+            )
+            return dom_jobs
+
         hint = ""
-        if "results-initials" not in page_html:
+        if "results-initials" not in page_html and not _listing_has_dom_cards(page_html):
             hint = (
                 " Use a listing URL with a locale prefix, e.g. "
                 "https://www.workana.com/en/jobs?..."
@@ -496,9 +650,7 @@ def _parse_jobs_page(page_html: str) -> list[WorkanaJob]:
         raise RuntimeError(
             "Could not read job listings (blocked or page layout changed)."
             + hint
-        ) from exc
-    results = payload.get("results") or []
-    return [_job_from_result(item) for item in results]
+        )
 
 
 class WorkanaFetchError(RuntimeError):
@@ -508,6 +660,40 @@ class WorkanaFetchError(RuntimeError):
 async def _fetch_page_html_playwright(url: str, *, proxy: str | None) -> str:
     log.info("Fetching Workana via Playwright (headless Chromium)")
     return await asyncio.to_thread(_fetch_html_via_playwright, url, proxy=proxy)
+
+
+async def _fetch_html_via_remote(
+    url: str, *, base_url: str, secret: str | None
+) -> str:
+    endpoint = base_url.rstrip("/") + "/fetch"
+    headers = {"Content-Type": "application/json"}
+    if secret:
+        headers["Authorization"] = f"Bearer {secret}"
+
+    timeout = httpx.Timeout(180.0, connect=30.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.post(endpoint, json={"url": url}, headers=headers)
+
+    if response.status_code >= 400:
+        detail = response.text[:300]
+        try:
+            detail = str(response.json().get("error", detail))
+        except Exception:
+            pass
+        raise WorkanaFetchError(
+            f"Home fetch bridge error HTTP {response.status_code}: {detail}"
+        )
+
+    data = response.json()
+    page_html = str(data.get("html") or "")
+    if _is_jobs_listing_url(url) and not _listing_html_ready(page_html):
+        raise WorkanaFetchError(
+            "Home fetch bridge returned a page without job listings "
+            "(check Workana on the home PC)."
+        )
+    if not page_html.strip():
+        raise WorkanaFetchError("Home fetch bridge returned empty HTML.")
+    return page_html
 
 
 async def _fetch_page_html_lightweight(url: str, *, proxy: str | None) -> str:
@@ -530,6 +716,14 @@ async def _fetch_page_html_lightweight(url: str, *, proxy: str | None) -> str:
 async def fetch_page_html(url: str) -> str:
     cfg = _fetch_config
     proxy = cfg.proxy
+
+    if cfg.remote_fetch_url:
+        log.info("Workana fetch: home PC bridge (%s)", cfg.remote_fetch_url)
+        return await _fetch_html_via_remote(
+            url,
+            base_url=cfg.remote_fetch_url,
+            secret=cfg.remote_fetch_secret,
+        )
 
     if cfg.use_playwright:
         try:
