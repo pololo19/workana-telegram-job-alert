@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse, urlunparse
 
 from dotenv import load_dotenv
 
@@ -24,6 +25,28 @@ def _parse_max_bids(raw: str | None) -> int | None:
 
 def _parse_bool(raw: str | None) -> bool:
     return (raw or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+_WORKANA_LOCALES = frozenset({"en", "es", "pt"})
+
+
+def normalize_workana_jobs_url(url: str) -> str:
+    """Workana listing data is SSR'd on /en/jobs (etc.), not bare /jobs."""
+    raw = url.strip()
+    parsed = urlparse(raw)
+    if not parsed.hostname or "workana.com" not in parsed.hostname.lower():
+        return raw
+
+    segments = [part for part in (parsed.path or "").split("/") if part]
+    if not segments or segments[0] != "jobs":
+        return raw
+
+    locale = os.environ.get("WORKANA_LOCALE", "en").strip().lower() or "en"
+    if locale not in _WORKANA_LOCALES:
+        locale = "en"
+
+    new_path = "/" + "/".join([locale, *segments])
+    return urlunparse(parsed._replace(path=new_path))
 
 
 @dataclass(frozen=True)
@@ -51,10 +74,12 @@ class Settings:
         if interval < 30:
             raise SystemExit("POLL_INTERVAL_SECONDS must be at least 30.")
 
-        url = os.environ.get(
-            "WORKANA_JOBS_URL",
-            "https://www.workana.com/en/jobs?order=recent&language=xx",
-        ).strip()
+        url = normalize_workana_jobs_url(
+            os.environ.get(
+                "WORKANA_JOBS_URL",
+                "https://www.workana.com/en/jobs?order=recent&language=xx",
+            )
+        )
 
         data_dir = BASE_DIR / "data"
         data_dir.mkdir(exist_ok=True)

@@ -11,6 +11,7 @@ import subprocess
 import time
 from dataclasses import dataclass, replace
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -192,7 +193,35 @@ def _job_from_result(item: dict[str, Any]) -> WorkanaJob:
     )
 
 
+def _extract_results_json_from_attribute(page_html: str) -> dict[str, Any] | None:
+    key = ":results-initials="
+    key_idx = page_html.find(key)
+    if key_idx < 0:
+        return None
+
+    rest = page_html[key_idx + len(key) :].lstrip()
+    if not rest or rest[0] not in ("'", '"'):
+        return None
+    quote = rest[0]
+
+    sneak_idx = rest.find(":sneak-peek-config", 1)
+    if sneak_idx < 0:
+        return None
+
+    chunk = rest[1:sneak_idx].rstrip()
+    if chunk.endswith(quote):
+        chunk = chunk[:-1]
+    return json.loads(html.unescape(chunk))
+
+
 def _extract_results_json(page_html: str) -> dict[str, Any]:
+    try:
+        payload = _extract_results_json_from_attribute(page_html)
+        if payload is not None:
+            return payload
+    except json.JSONDecodeError:
+        pass
+
     match = RESULTS_INITIALS_RE.search(page_html)
     if not match:
         raise ValueError(
@@ -250,6 +279,11 @@ def _curl_executable() -> str | None:
 
 def _is_cloudflare_challenge(page_html: str) -> bool:
     return "Just a moment" in page_html and "results-initials" not in page_html
+
+
+def _is_jobs_listing_url(url: str) -> bool:
+    path = urlparse(url).path or ""
+    return re.search(r"/jobs/?$", path) or "/jobs" in path
 
 
 def _fetch_html_via_curl(
@@ -351,17 +385,19 @@ def _fetch_html_via_playwright(url: str, *, proxy: str | None = None) -> str:
             )
             page = context.new_page()
             page.goto(url, wait_until="domcontentloaded", timeout=90_000)
-            try:
+            if _is_jobs_listing_url(url):
                 page.wait_for_function(
-                    """() => {
-                        const html = document.documentElement.innerHTML;
-                        return html.includes('results-initials')
-                            || html.includes('class="h4 user-name"');
-                    }""",
-                    timeout=60_000,
+                    """() => document.documentElement.innerHTML.includes('results-initials')""",
+                    timeout=90_000,
                 )
-            except Exception:
-                page.wait_for_timeout(8000)
+            else:
+                try:
+                    page.wait_for_function(
+                        """() => document.documentElement.innerHTML.includes('class="h4 user-name"')""",
+                        timeout=60_000,
+                    )
+                except Exception:
+                    page.wait_for_timeout(8000)
             content = page.content()
             if _is_cloudflare_challenge(content):
                 raise RuntimeError(
@@ -382,8 +418,15 @@ def _parse_jobs_page(page_html: str) -> list[WorkanaJob]:
     try:
         payload = _extract_results_json(page_html)
     except ValueError as exc:
+        hint = ""
+        if "results-initials" not in page_html:
+            hint = (
+                " Use a listing URL with a locale prefix, e.g. "
+                "https://www.workana.com/en/jobs?..."
+            )
         raise RuntimeError(
             "Could not read job listings (blocked or page layout changed)."
+            + hint
         ) from exc
     results = payload.get("results") or []
     return [_job_from_result(item) for item in results]

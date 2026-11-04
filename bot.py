@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
@@ -13,7 +14,7 @@ except ImportError:
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
 
-from config import Settings
+from config import Settings, normalize_workana_jobs_url
 from locale_en import (
     english_budget,
     english_country,
@@ -170,7 +171,14 @@ async def poll_loop(settings: Settings) -> None:
         )
     )
 
-    log.info("Workana URL: %s", settings.workana_jobs_url)
+    raw_url = os.environ.get("WORKANA_JOBS_URL", "").strip()
+    if raw_url and normalize_workana_jobs_url(raw_url) != raw_url:
+        log.info(
+            "Workana URL normalized to %s (bare /jobs URLs omit listing data)",
+            settings.workana_jobs_url,
+        )
+    else:
+        log.info("Workana URL: %s", settings.workana_jobs_url)
     log.info("Poll every %s seconds", settings.poll_interval_seconds)
     if settings.workana_use_playwright:
         log.info("Workana fetch: headless Chromium (Playwright)")
