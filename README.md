@@ -121,8 +121,10 @@ Do **not** copy the Windows `.venv` folder to the server. Upload the project (gi
      WORKANA_USE_PLAYWRIGHT=true
      ```
 
-     Then run `python bot.py` again. First fetch may take up to ~30s while the challenge clears.
+     Then run `python bot.py` again. First fetch may take 1–3 minutes on a VPS while Cloudflare clears.
 
+   - If Playwright **times out** or listing data never appears, the VPS IP is likely blocked permanently. Use a **residential** `WORKANA_PROXY`, run the bot on your **home PC**, or change VPS region/provider.
+   - With `WORKANA_USE_PLAYWRIGHT=true`, the bot still tries **curl first** when that works (faster than Chromium).
    - Alternative: set `WORKANA_PROXY` to a **residential** HTTP proxy and keep `WORKANA_USE_PLAYWRIGHT=false`.
    - Persisted state lives in `data/seen_jobs.json` — back it up if you rebuild the VPS so you do not get duplicate “new job” floods.
 

@@ -167,6 +167,7 @@ async def poll_loop(settings: Settings) -> None:
     configure_workana_fetch(
         WorkanaFetchConfig(
             use_playwright=settings.workana_use_playwright,
+            playwright_fallback=settings.workana_playwright_fallback,
             proxy=settings.workana_proxy,
         )
     )
@@ -182,6 +183,8 @@ async def poll_loop(settings: Settings) -> None:
     log.info("Poll every %s seconds", settings.poll_interval_seconds)
     if settings.workana_use_playwright:
         log.info("Workana fetch: headless Chromium (Playwright)")
+    elif settings.workana_playwright_fallback:
+        log.info("Workana fetch: curl/httpx, then Playwright if blocked")
     if settings.workana_proxy:
         log.info("Workana fetch: using proxy")
     if settings.keywords:

@@ -58,6 +58,7 @@ class Settings:
     keywords: list[str]
     max_bids: int | None
     workana_use_playwright: bool
+    workana_playwright_fallback: bool
     workana_proxy: str | None
     data_dir: Path
 
@@ -95,6 +96,9 @@ class Settings:
             max_bids=_parse_max_bids(os.environ.get("MAX_BIDS")),
             workana_use_playwright=_parse_bool(
                 os.environ.get("WORKANA_USE_PLAYWRIGHT")
+            ),
+            workana_playwright_fallback=_parse_bool(
+                os.environ.get("WORKANA_PLAYWRIGHT_FALLBACK")
             ),
             workana_proxy=proxy,
             data_dir=data_dir,
