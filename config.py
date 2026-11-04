@@ -22,6 +22,10 @@ def _parse_max_bids(raw: str | None) -> int | None:
     return int(raw.strip())
 
 
+def _parse_bool(raw: str | None) -> bool:
+    return (raw or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 @dataclass(frozen=True)
 class Settings:
     telegram_bot_token: str
@@ -30,6 +34,8 @@ class Settings:
     workana_jobs_url: str
     keywords: list[str]
     max_bids: int | None
+    workana_use_playwright: bool
+    workana_proxy: str | None
     data_dir: Path
 
     @classmethod
@@ -53,6 +59,8 @@ class Settings:
         data_dir = BASE_DIR / "data"
         data_dir.mkdir(exist_ok=True)
 
+        proxy = os.environ.get("WORKANA_PROXY", "").strip() or None
+
         return cls(
             telegram_bot_token=token,
             telegram_chat_id=chat_id,
@@ -60,5 +68,9 @@ class Settings:
             workana_jobs_url=url,
             keywords=_parse_keywords(os.environ.get("KEYWORDS")),
             max_bids=_parse_max_bids(os.environ.get("MAX_BIDS")),
+            workana_use_playwright=_parse_bool(
+                os.environ.get("WORKANA_USE_PLAYWRIGHT")
+            ),
+            workana_proxy=proxy,
             data_dir=data_dir,
         )

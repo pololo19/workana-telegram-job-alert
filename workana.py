@@ -4,6 +4,7 @@ import asyncio
 import html
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -216,30 +217,70 @@ DEFAULT_HEADERS = {
 }
 
 
+@dataclass(frozen=True)
+class WorkanaFetchConfig:
+    use_playwright: bool = False
+    proxy: str | None = None
+
+
+_fetch_config = WorkanaFetchConfig()
+
+
+def configure_workana_fetch(config: WorkanaFetchConfig) -> None:
+    global _fetch_config
+    _fetch_config = config
+
+
 def _curl_executable() -> str | None:
-    return shutil.which("curl.exe") or shutil.which("curl")
+    custom = os.environ.get("WORKANA_CURL", "").strip()
+    if custom:
+        return custom
+    for name in (
+        "curl-impersonate-chrome",
+        "curl_chrome116",
+        "curl_chrome120",
+        "curl.exe",
+        "curl",
+    ):
+        path = shutil.which(name)
+        if path:
+            return path
+    return None
 
 
-def _fetch_html_via_curl(url: str, *, max_attempts: int = 3) -> str:
+def _is_cloudflare_challenge(page_html: str) -> bool:
+    return "Just a moment" in page_html and "results-initials" not in page_html
+
+
+def _fetch_html_via_curl(
+    url: str, *, proxy: str | None = None, max_attempts: int = 3
+) -> str:
     curl = _curl_executable()
     if not curl:
         raise RuntimeError("curl is not installed.")
 
     last_detail = "unknown error"
     for attempt in range(max_attempts):
+        cmd = [
+            curl,
+            "-sL",
+            "--compressed",
+            "--connect-timeout",
+            "30",
+            "--max-time",
+            "60",
+            "-A",
+            USER_AGENT,
+        ]
+        for key, value in DEFAULT_HEADERS.items():
+            if key == "User-Agent":
+                continue
+            cmd.extend(["-H", f"{key}: {value}"])
+        if proxy:
+            cmd.extend(["-x", proxy])
+        cmd.append(url)
         result = subprocess.run(
-            [
-                curl,
-                "-sL",
-                "--compressed",
-                "--connect-timeout",
-                "30",
-                "--max-time",
-                "60",
-                "-A",
-                USER_AGENT,
-                url,
-            ],
+            cmd,
             capture_output=True,
             timeout=75,
             check=False,
@@ -247,8 +288,12 @@ def _fetch_html_via_curl(url: str, *, max_attempts: int = 3) -> str:
         if result.returncode == 0:
             text = result.stdout.decode("utf-8", errors="replace")
             if text.strip():
-                return text
-            last_detail = "empty response body"
+                if _is_cloudflare_challenge(text):
+                    last_detail = "Cloudflare challenge page"
+                else:
+                    return text
+            else:
+                last_detail = "empty response body"
         else:
             stderr = result.stderr.decode("utf-8", errors="replace").strip()
             last_detail = f"exit {result.returncode}"
@@ -271,22 +316,68 @@ def _fetch_html_via_curl(url: str, *, max_attempts: int = 3) -> str:
     )
 
 
-async def _fetch_html_via_httpx(url: str) -> str:
+async def _fetch_html_via_httpx(url: str, *, proxy: str | None = None) -> str:
     async with httpx.AsyncClient(
         follow_redirects=True,
         timeout=httpx.Timeout(45.0),
         headers=DEFAULT_HEADERS,
+        proxy=proxy,
     ) as client:
         response = await client.get(url)
         response.raise_for_status()
         return response.text
 
 
-def _parse_jobs_page(page_html: str) -> list[WorkanaJob]:
-    if "Just a moment" in page_html and "results-initials" not in page_html:
+def _fetch_html_via_playwright(url: str, *, proxy: str | None = None) -> str:
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
         raise RuntimeError(
-            "Workana returned a Cloudflare challenge. Try again later, "
-            "increase POLL_INTERVAL_SECONDS, or run from a residential network."
+            "WORKANA_USE_PLAYWRIGHT is enabled but playwright is not installed. "
+            "On the VPS run: pip install playwright && playwright install chromium "
+            "&& playwright install-deps"
+        ) from exc
+
+    with sync_playwright() as playwright:
+        launch_opts: dict[str, Any] = {"headless": True}
+        if proxy:
+            launch_opts["proxy"] = {"server": proxy}
+        browser = playwright.chromium.launch(**launch_opts)
+        try:
+            context = browser.new_context(
+                user_agent=USER_AGENT,
+                locale="en-US",
+                viewport={"width": 1280, "height": 720},
+            )
+            page = context.new_page()
+            page.goto(url, wait_until="domcontentloaded", timeout=90_000)
+            try:
+                page.wait_for_function(
+                    """() => {
+                        const html = document.documentElement.innerHTML;
+                        return html.includes('results-initials')
+                            || html.includes('class="h4 user-name"');
+                    }""",
+                    timeout=60_000,
+                )
+            except Exception:
+                page.wait_for_timeout(8000)
+            content = page.content()
+            if _is_cloudflare_challenge(content):
+                raise RuntimeError(
+                    "Workana still returned Cloudflare after browser fetch. "
+                    "Try a residential WORKANA_PROXY or run the bot from a home PC."
+                )
+            return content
+        finally:
+            browser.close()
+
+
+def _parse_jobs_page(page_html: str) -> list[WorkanaJob]:
+    if _is_cloudflare_challenge(page_html):
+        raise RuntimeError(
+            "Workana returned a Cloudflare challenge. On a VPS, set "
+            "WORKANA_USE_PLAYWRIGHT=true (see README) or use WORKANA_PROXY."
         )
     try:
         payload = _extract_results_json(page_html)
@@ -299,14 +390,23 @@ def _parse_jobs_page(page_html: str) -> list[WorkanaJob]:
 
 
 async def fetch_page_html(url: str) -> str:
+    cfg = _fetch_config
+    proxy = cfg.proxy
+
+    if cfg.use_playwright:
+        log.debug("Fetching via Playwright: %s", url)
+        return await asyncio.to_thread(_fetch_html_via_playwright, url, proxy=proxy)
+
     if _curl_executable():
         try:
-            return await asyncio.to_thread(_fetch_html_via_curl, url)
+            return await asyncio.to_thread(
+                _fetch_html_via_curl, url, proxy=proxy
+            )
         except RuntimeError as exc:
             log.warning("curl fetch failed, falling back to httpx: %s", exc)
 
     try:
-        return await _fetch_html_via_httpx(url)
+        return await _fetch_html_via_httpx(url, proxy=proxy)
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code not in (403, 429):
             raise
@@ -315,7 +415,7 @@ async def fetch_page_html(url: str) -> str:
                 "Workana blocked the request (HTTP "
                 f"{exc.response.status_code}). Install curl or try again later."
             ) from exc
-        return await asyncio.to_thread(_fetch_html_via_curl, url)
+        return await asyncio.to_thread(_fetch_html_via_curl, url, proxy=proxy)
 
 
 async def enrich_job_from_detail(job: WorkanaJob) -> WorkanaJob:

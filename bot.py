@@ -17,7 +17,13 @@ from locale_en import (
     english_published,
 )
 from storage import SeenJobStore
-from workana import WorkanaJob, enrich_job_from_detail, fetch_recent_jobs
+from workana import (
+    WorkanaFetchConfig,
+    WorkanaJob,
+    configure_workana_fetch,
+    enrich_job_from_detail,
+    fetch_recent_jobs,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -152,9 +158,19 @@ async def send_alert(bot: Bot, chat_id: str, job: WorkanaJob) -> None:
 async def poll_loop(settings: Settings) -> None:
     store = SeenJobStore(settings.data_dir / "seen_jobs.json")
     bot = Bot(token=settings.telegram_bot_token)
+    configure_workana_fetch(
+        WorkanaFetchConfig(
+            use_playwright=settings.workana_use_playwright,
+            proxy=settings.workana_proxy,
+        )
+    )
 
     log.info("Workana URL: %s", settings.workana_jobs_url)
     log.info("Poll every %s seconds", settings.poll_interval_seconds)
+    if settings.workana_use_playwright:
+        log.info("Workana fetch: headless Chromium (Playwright)")
+    if settings.workana_proxy:
+        log.info("Workana fetch: using proxy")
     if settings.keywords:
         log.info("Keywords: %s", ", ".join(settings.keywords))
     if settings.max_bids is not None:

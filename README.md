@@ -106,7 +106,24 @@ Do **not** copy the Windows `.venv` folder to the server. Upload the project (gi
 5. **VPS notes**
 
    - Install **curl** (used when Workana returns 403/429).
-   - Datacenter IPs sometimes hit **Cloudflare** more often than a home connection. If logs show “Cloudflare challenge”, raise `POLL_INTERVAL_SECONDS` (e.g. 120–180) or try another region/provider.
+   - **Cloudflare on VPS:** Workana often blocks datacenter IPs. Raising `POLL_INTERVAL_SECONDS` alone usually does not fix it. Use headless Chromium:
+
+     ```bash
+     source .venv/bin/activate   # or your .venv311
+     pip install -r requirements.txt
+     playwright install chromium
+     playwright install-deps
+     ```
+
+     In `.env`:
+
+     ```env
+     WORKANA_USE_PLAYWRIGHT=true
+     ```
+
+     Then run `python bot.py` again. First fetch may take up to ~30s while the challenge clears.
+
+   - Alternative: set `WORKANA_PROXY` to a **residential** HTTP proxy and keep `WORKANA_USE_PLAYWRIGHT=false`.
    - Persisted state lives in `data/seen_jobs.json` — back it up if you rebuild the VPS so you do not get duplicate “new job” floods.
 
 ## Filters
@@ -136,7 +153,7 @@ Open filters in the browser, copy the address bar, paste into `.env`.
 
 ## Cloudflare
 
-If you see “Cloudflare challenge” in logs, Workana is rate-limiting or blocking your IP. Increase `POLL_INTERVAL_SECONDS` or run from a normal home connection.
+If you see “Cloudflare challenge” in logs, Workana is blocking automated requests from your IP (common on VPS). On a server, set `WORKANA_USE_PLAYWRIGHT=true` (see **Ubuntu VPS** above). On a home PC, curl/httpx is usually enough; you can also try a higher `POLL_INTERVAL_SECONDS`.
 
 ## Legal / etiquette
 
