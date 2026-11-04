@@ -4,7 +4,12 @@ import asyncio
 import logging
 import sys
 
-from telegram import Bot, CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+
+try:
+    from telegram import CopyTextButton
+except ImportError:
+    CopyTextButton = None  # python-telegram-bot < 22
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
 
@@ -132,17 +137,17 @@ def format_job_message(job: WorkanaJob) -> str:
 
 
 def job_link_keyboard(job: WorkanaJob) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("Open job ↗", url=job.url),
-                InlineKeyboardButton(
-                    "📋 Copy link",
-                    copy_text=CopyTextButton(text=job.url),
-                ),
-            ]
-        ]
-    )
+    row: list[InlineKeyboardButton] = [
+        InlineKeyboardButton("Open job ↗", url=job.url),
+    ]
+    if CopyTextButton is not None:
+        row.append(
+            InlineKeyboardButton(
+                "📋 Copy link",
+                copy_text=CopyTextButton(text=job.url),
+            )
+        )
+    return InlineKeyboardMarkup([row])
 
 
 async def send_alert(bot: Bot, chat_id: str, job: WorkanaJob) -> None:
