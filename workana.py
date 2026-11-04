@@ -188,6 +188,170 @@ def _parse_job_sidebar(page_html: str) -> dict[str, Any]:
     }
 
 
+def _sidebar_has_client_stats(sidebar: dict[str, Any]) -> bool:
+    return any(
+        sidebar.get(key) is not None
+        for key in (
+            "published_projects",
+            "projects_paid",
+            "interested_freelancers",
+            "bids",
+        )
+    )
+
+
+def _apply_sidebar_to_job(job: WorkanaJob, sidebar: dict[str, Any]) -> WorkanaJob:
+    updates: dict[str, Any] = {
+        "published_projects": sidebar["published_projects"],
+        "projects_paid": sidebar["projects_paid"],
+        "member_since": sidebar["member_since"],
+        "interested_freelancers": sidebar["interested_freelancers"],
+    }
+    if sidebar["client_name"]:
+        updates["client_name"] = sidebar["client_name"]
+    if sidebar["client_rating"] is not None:
+        updates["client_rating"] = sidebar["client_rating"]
+    if sidebar["client_country_code"]:
+        updates["client_country_code"] = sidebar["client_country_code"]
+    if sidebar["bids"] is not None:
+        updates["bids"] = sidebar["bids"]
+    return replace(job, **updates)
+
+
+_PLAYWRIGHT_JOB_DETAIL_JS = """
+() => {
+  const root =
+    document.querySelector('.project-details-sidebar') ||
+    document.querySelector('.sidebar-project') ||
+    document.querySelector('.project-sidebar') ||
+    document.querySelector('aside') ||
+    document.body;
+
+  const stats = {};
+  root.querySelectorAll('p.h4').forEach((h4) => {
+    const num = h4.textContent.trim();
+    const labelEl = h4.nextElementSibling;
+    if (labelEl && labelEl.tagName === 'P' && /^\\d+$/.test(num)) {
+      stats[labelEl.textContent.trim()] = parseInt(num, 10);
+    }
+  });
+
+  const nameEl =
+    root.querySelector('.h4.user-name span') ||
+    root.querySelector('h4.user-name span') ||
+    document.querySelector('.h4.user-name span');
+  const starsEl =
+    root.querySelector('.stars-fill') ||
+    document.querySelector('.profile-stars .stars-fill');
+  const flagEl =
+    root.querySelector('[class*="flag-"]') ||
+    document.querySelector('[class*="flag-"]');
+
+  let countryCode = '';
+  if (flagEl && flagEl.classList) {
+    for (const cls of flagEl.classList) {
+      if (cls.startsWith('flag-') && cls.length === 7) {
+        countryCode = cls.slice(5).toUpperCase();
+        break;
+      }
+    }
+  }
+
+  let memberSince = '';
+  for (const p of root.querySelectorAll('p')) {
+    const t = p.textContent.trim();
+    if (/^(Member since|Miembro desde|Membro desde)/i.test(t)) {
+      memberSince = t.split(':').slice(1).join(':').trim();
+      break;
+    }
+  }
+
+  return {
+    stats,
+    clientName: nameEl ? nameEl.textContent.trim() : '',
+    ratingWidth: starsEl ? starsEl.style.width : '',
+    countryCode,
+    memberSince,
+  };
+}
+"""
+
+
+def _sidebar_from_playwright_data(data: dict[str, Any]) -> dict[str, Any]:
+    stats: dict[str, int] = {}
+    for label, value in (data.get("stats") or {}).items():
+        try:
+            stats[normalize_stat_label(str(label))] = int(value)
+        except (TypeError, ValueError):
+            continue
+
+    rating: float | None = None
+    width = str(data.get("ratingWidth") or "")
+    width_match = re.search(r"([\d.]+)", width)
+    if width_match:
+        rating = float(width_match.group(1)) / 100 * 5
+
+    return {
+        "client_name": str(data.get("clientName") or "").strip(),
+        "client_rating": rating,
+        "client_country_code": str(data.get("countryCode") or "").strip(),
+        "published_projects": stats.get("published projects"),
+        "projects_paid": stats.get("projects paid"),
+        "member_since": english_member_since(str(data.get("memberSince") or "")),
+        "bids": stats.get("bids"),
+        "interested_freelancers": stats.get("interested freelancers"),
+    }
+
+
+def _enrich_job_via_playwright(job: WorkanaJob, *, proxy: str | None = None) -> WorkanaJob:
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise RuntimeError("playwright is not installed.") from exc
+
+    wait_sec = min(
+        float(os.environ.get("WORKANA_PLAYWRIGHT_WAIT_SECONDS", "180")), 120.0
+    )
+
+    with sync_playwright() as playwright:
+        launch_opts: dict[str, Any] = {
+            "headless": True,
+            "args": [
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+            ],
+            "ignore_default_args": ["--enable-automation"],
+        }
+        if proxy:
+            launch_opts["proxy"] = {"server": proxy}
+        browser = playwright.chromium.launch(**launch_opts)
+        try:
+            context = browser.new_context(
+                user_agent=_browser_user_agent(),
+                locale="en-US",
+                viewport={"width": 1280, "height": 720},
+                extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
+            )
+            context.add_init_script(
+                "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
+            )
+            page = context.new_page()
+            page.goto(job.url, wait_until="load", timeout=120_000)
+            _wait_for_playwright_content(
+                page,
+                jobs_listing=False,
+                timeout_sec=wait_sec,
+            )
+            data = page.evaluate(_PLAYWRIGHT_JOB_DETAIL_JS)
+            sidebar = _sidebar_from_playwright_data(data)
+            if not _sidebar_has_client_stats(sidebar):
+                sidebar = _parse_job_sidebar(page.content())
+            return _apply_sidebar_to_job(job, sidebar)
+        finally:
+            browser.close()
+
+
 def _job_from_result(item: dict[str, Any]) -> WorkanaJob:
     slug = item["slug"]
     skills = tuple(s.get("anchorText", "") for s in item.get("skills") or [])
@@ -466,7 +630,6 @@ def _job_from_dom_block(block: str) -> WorkanaJob | None:
     bids = int(bids_match.group(1)) if bids_match else 0
 
     published_raw = _dom_plain_text(_dom_first(_DOM_DATE_RE, block))
-    published = english_published(published_raw) if published_raw else ""
 
     desc_html = _DOM_DESC_RE.search(block)
     description_snippet = _description_snippet(
@@ -474,9 +637,14 @@ def _job_from_dom_block(block: str) -> WorkanaJob | None:
     )
 
     skills = tuple(m.group(1).strip() for m in _DOM_SKILL_RE.finditer(block))
+    if not skills:
+        skills = tuple(
+            m.group(1).strip()
+            for m in re.finditer(r'class="skill[^"]*"[^>]*>([^<]+)', block, re.I)
+        )
+
     client_name = html.unescape(_dom_first(_DOM_CLIENT_RE, block))
     country_raw = html.unescape(_dom_first(_DOM_COUNTRY_RE, block))
-    country = english_country(country_raw) if country_raw else ""
 
     flag_match = _DOM_FLAG_RE.search(block)
     client_country_code = flag_match.group(1).upper() if flag_match else ""
@@ -489,18 +657,25 @@ def _job_from_dom_block(block: str) -> WorkanaJob | None:
     last_reply = ""
     reply_match = _DOM_LAST_REPLY_RE.search(block)
     if reply_match:
-        last_reply = english_last_reply(reply_match.group(2).strip())
+        last_reply = reply_match.group(2).strip()
 
-    budget = english_budget(budget_raw) if budget_raw else ""
+    if not budget_raw:
+        budget_match = re.search(
+            r'class="budget[^"]*"[^>]*>.*?class="values"[^>]*>([^<]+)',
+            block,
+            re.DOTALL | re.IGNORECASE,
+        )
+        if budget_match:
+            budget_raw = budget_match.group(1).strip()
 
     return WorkanaJob(
         slug=slug,
         title=title,
         url=f"https://www.workana.com/job/{slug}",
-        budget=budget,
-        published=published,
+        budget=budget_raw,
+        published=published_raw,
         bids=bids,
-        country=country,
+        country=country_raw,
         skills=skills,
         is_urgent="label-urgent" in block.lower() or "urgent" in block[:500].lower(),
         verified_payment="payment-verified" in block,
@@ -510,6 +685,149 @@ def _job_from_dom_block(block: str) -> WorkanaJob | None:
         client_country_code=client_country_code,
         last_reply=last_reply,
     )
+
+
+_PLAYWRIGHT_LISTING_JS = """
+() => Array.from(document.querySelectorAll('.project-item')).map((card) => {
+  const link = card.querySelector('.project-title a[href*="/job/"]');
+  const href = link ? link.getAttribute('href') : '';
+  const slugMatch = href.match(/\\/job\\/([^/?#]+)/);
+  const titleNode = card.querySelector('.project-title [title]');
+  const budgetNode =
+    card.querySelector('.budget .values') ||
+    card.querySelector('p.budget .values') ||
+    card.querySelector('.budget');
+  const dateNode =
+    card.querySelector('.project-main-details .date') ||
+    card.querySelector('.project-body .date') ||
+    card.querySelector('.date');
+  const bidsNode = card.querySelector('.bids');
+  const descNode = card.querySelector('.text-expander-content');
+  const clientNode =
+    card.querySelector('.author-info.user-name button span') ||
+    card.querySelector('.author-info.user-name span') ||
+    card.querySelector('.user-name span');
+  const countryNode = card.querySelector('.country-name');
+  const flagNode = card.querySelector('[class*="flag-"]');
+  let countryCode = '';
+  if (flagNode && flagNode.classList) {
+    for (const cls of flagNode.classList) {
+      if (cls.startsWith('flag-') && cls.length === 7) {
+        countryCode = cls.slice(5).toUpperCase();
+        break;
+      }
+    }
+  }
+  const starsNode = card.querySelector('.stars-fill');
+  const msgNode = card.querySelector('.message-created');
+  let lastReply = '';
+  if (msgNode) {
+    const spans = msgNode.querySelectorAll('span');
+    if (spans.length) {
+      lastReply = spans[spans.length - 1].textContent.trim();
+    }
+  }
+  return {
+    slug: slugMatch ? slugMatch[1] : '',
+    title: (titleNode && titleNode.getAttribute('title')) ||
+      (link && link.textContent.trim()) || '',
+    budget: budgetNode ? budgetNode.textContent.trim() : '',
+    published: dateNode ? dateNode.textContent.trim() : '',
+    bidsText: bidsNode ? bidsNode.textContent.trim() : '',
+    description: descNode ? descNode.textContent.trim() : '',
+    skills: Array.from(card.querySelectorAll('a.skill'))
+      .map((a) => a.textContent.trim())
+      .filter(Boolean),
+    clientName: clientNode ? clientNode.textContent.trim() : '',
+    country: countryNode ? countryNode.textContent.trim() : '',
+    countryCode,
+    ratingWidth: starsNode ? starsNode.style.width : '',
+    lastReply,
+    verifiedPayment: !!card.querySelector('.payment-verified'),
+    isUrgent: card.classList.contains('urgent') ||
+      !!card.querySelector('.label-urgent, .urgent'),
+  };
+}).filter((item) => item.slug)
+"""
+
+
+def _job_from_playwright_record(record: dict[str, Any]) -> WorkanaJob:
+    slug = str(record.get("slug") or "").strip()
+    rating: float | None = None
+    width = str(record.get("ratingWidth") or "")
+    width_match = re.search(r"([\d.]+)", width)
+    if width_match:
+        rating = float(width_match.group(1)) / 100 * 5
+
+    description = str(record.get("description") or "").strip()
+    return WorkanaJob(
+        slug=slug,
+        title=html.unescape(str(record.get("title") or slug)),
+        url=f"https://www.workana.com/job/{slug}",
+        budget=str(record.get("budget") or "").strip(),
+        published=str(record.get("published") or "").strip(),
+        bids=_parse_bids(str(record.get("bidsText") or "")),
+        country=str(record.get("country") or "").strip(),
+        skills=tuple(record.get("skills") or ()),
+        is_urgent=bool(record.get("isUrgent")),
+        verified_payment=bool(record.get("verifiedPayment")),
+        description_snippet=_description_snippet(description),
+        client_name=str(record.get("clientName") or "").strip(),
+        client_rating=rating,
+        client_country_code=str(record.get("countryCode") or "").strip(),
+        last_reply=str(record.get("lastReply") or "").strip(),
+    )
+
+
+def _fetch_listing_jobs_via_playwright(
+    url: str, *, proxy: str | None = None
+) -> list[WorkanaJob]:
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise RuntimeError(
+            "WORKANA_USE_PLAYWRIGHT is enabled but playwright is not installed."
+        ) from exc
+
+    wait_sec = float(os.environ.get("WORKANA_PLAYWRIGHT_WAIT_SECONDS", "180"))
+
+    with sync_playwright() as playwright:
+        launch_opts: dict[str, Any] = {
+            "headless": True,
+            "args": [
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+            ],
+            "ignore_default_args": ["--enable-automation"],
+        }
+        if proxy:
+            launch_opts["proxy"] = {"server": proxy}
+        browser = playwright.chromium.launch(**launch_opts)
+        try:
+            context = browser.new_context(
+                user_agent=_browser_user_agent(),
+                locale="en-US",
+                viewport={"width": 1280, "height": 720},
+                extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
+            )
+            context.add_init_script(
+                "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
+            )
+            page = context.new_page()
+            page.goto(url, wait_until="load", timeout=120_000)
+            _wait_for_playwright_content(
+                page,
+                jobs_listing=True,
+                timeout_sec=wait_sec,
+            )
+            records = page.evaluate(_PLAYWRIGHT_LISTING_JS)
+            jobs = [_job_from_playwright_record(item) for item in records]
+            if not jobs:
+                raise RuntimeError("Playwright found no jobs in .project-item cards")
+            return jobs
+        finally:
+            browser.close()
 
 
 def _parse_jobs_from_dom_html(page_html: str) -> list[WorkanaJob]:
@@ -748,25 +1066,67 @@ async def fetch_page_html(url: str) -> str:
 
 
 async def enrich_job_from_detail(job: WorkanaJob) -> WorkanaJob:
+    cfg = _fetch_config
+
+    if cfg.use_playwright and not cfg.remote_fetch_url:
+        enriched = await asyncio.to_thread(
+            _enrich_job_via_playwright, job, proxy=cfg.proxy
+        )
+        if _sidebar_has_client_stats(
+            {
+                "published_projects": enriched.published_projects,
+                "projects_paid": enriched.projects_paid,
+                "interested_freelancers": enriched.interested_freelancers,
+                "bids": enriched.bids,
+            }
+        ):
+            log.info("Loaded client stats from job page for %s", job.slug)
+        return enriched
+
     page_html = await fetch_page_html(job.url)
     sidebar = _parse_job_sidebar(page_html)
-    updates: dict[str, Any] = {
-        "published_projects": sidebar["published_projects"],
-        "projects_paid": sidebar["projects_paid"],
-        "member_since": sidebar["member_since"],
-        "interested_freelancers": sidebar["interested_freelancers"],
-    }
-    if sidebar["client_name"]:
-        updates["client_name"] = sidebar["client_name"]
-    if sidebar["client_rating"] is not None:
-        updates["client_rating"] = sidebar["client_rating"]
-    if sidebar["client_country_code"]:
-        updates["client_country_code"] = sidebar["client_country_code"]
-    if sidebar["bids"] is not None:
-        updates["bids"] = sidebar["bids"]
-    return replace(job, **updates)
+    if (
+        cfg.playwright_fallback
+        and not cfg.remote_fetch_url
+        and not _sidebar_has_client_stats(sidebar)
+    ):
+        try:
+            enriched = await asyncio.to_thread(
+                _enrich_job_via_playwright, job, proxy=cfg.proxy
+            )
+            log.debug("Client stats loaded via Playwright fallback for %s", job.slug)
+            return enriched
+        except Exception as exc:
+            log.warning(
+                "Playwright client enrich failed for %s: %s",
+                job.slug,
+                exc,
+            )
+
+    return _apply_sidebar_to_job(job, sidebar)
 
 
 async def fetch_recent_jobs(jobs_url: str) -> list[WorkanaJob]:
+    cfg = _fetch_config
+    if (
+        cfg.use_playwright
+        and not cfg.remote_fetch_url
+        and _is_jobs_listing_url(jobs_url)
+    ):
+        try:
+            jobs = await asyncio.to_thread(
+                _fetch_listing_jobs_via_playwright, jobs_url, proxy=cfg.proxy
+            )
+            log.info(
+                "Parsed %s jobs via Playwright card extractor (full listing fields)",
+                len(jobs),
+            )
+            return jobs
+        except Exception as exc:
+            log.warning(
+                "Playwright card extractor failed, falling back to HTML parse: %s",
+                exc,
+            )
+
     page_html = await fetch_page_html(jobs_url)
     return _parse_jobs_page(page_html)

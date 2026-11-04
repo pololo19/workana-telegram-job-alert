@@ -128,6 +128,8 @@ def english_published(raw: str) -> str:
     text = (raw or "").strip()
     if not text:
         return "—"
+    if re.match(r"^Posted:\s", text, re.I):
+        return text
     relative = english_relative_time(text)
     if relative and relative != text:
         return f"Posted: {relative}"
