@@ -1,4 +1,4 @@
-"""Print your Telegram chat ID after you send /start to your bot."""
+"""Print Telegram chat IDs from recent bot updates (DM or channel)."""
 
 from __future__ import annotations
 
@@ -11,6 +11,22 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def _print_chat(chat: dict) -> None:
+    chat_id = chat.get("id")
+    if chat_id is None:
+        return
+    title = chat.get("title") or chat.get("first_name") or chat.get("username") or "chat"
+    username = chat.get("username")
+    kind = chat.get("type") or "unknown"
+    if username and kind == "channel":
+        print(f"Channel: @{username}  (numeric id: {chat_id})")
+        print(f"  → TELEGRAM_CHAT_ID=@{username}")
+    else:
+        print(f"Chat ID: {chat_id}  ({title}, type={kind})")
+        if kind == "channel":
+            print(f"  → TELEGRAM_CHAT_ID={chat_id}")
+
+
 def main() -> None:
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:
@@ -19,7 +35,7 @@ def main() -> None:
 
     url = f"https://api.telegram.org/bot{token}/getUpdates"
     try:
-        response = httpx.get(url, params={"limit": 10, "timeout": 0}, timeout=20.0)
+        response = httpx.get(url, params={"limit": 100, "timeout": 0}, timeout=20.0)
         response.raise_for_status()
     except httpx.HTTPError as exc:
         print(f"Could not reach Telegram API: {exc}", file=sys.stderr)
@@ -33,26 +49,46 @@ def main() -> None:
     updates = data.get("result") or []
     if not updates:
         print(
-            "No messages yet.\n"
-            "1. Open https://t.me/my_workana_alert_bot\n"
-            "2. Tap Start and send /start\n"
-            "3. Run this script again: python get_chat_id.py"
+            "No updates yet.\n\n"
+            "For a **Telegram channel** (recommended):\n"
+            "  1. Create your channel in Telegram.\n"
+            "  2. Channel settings → Administrators → Add your bot.\n"
+            "     Enable **Post messages** (and Edit messages if you want).\n"
+            "  3. Post any message in the channel (or re-add the bot).\n"
+            "  4. Run this script again: python get_chat_id.py\n\n"
+            "For a private DM instead:\n"
+            "  1. Open your bot in Telegram → Start → send /start\n"
+            "  2. Run this script again.\n"
         )
         raise SystemExit(1)
 
-    seen: set[int] = set()
+    seen: set[int | str] = set()
     for item in updates:
-        message = item.get("message") or item.get("edited_message")
-        if not message:
-            continue
-        chat = message.get("chat") or {}
-        chat_id = chat.get("id")
-        if chat_id is None or chat_id in seen:
-            continue
-        seen.add(chat_id)
-        name = chat.get("first_name") or chat.get("username") or "you"
-        print(f"Chat ID: {chat_id}  ({name})")
-    print("\nCopy the Chat ID into TELEGRAM_CHAT_ID in your .env file.")
+        for key in ("message", "edited_message", "channel_post", "edited_channel_post"):
+            message = item.get(key)
+            if not message:
+                continue
+            chat = message.get("chat") or {}
+            chat_id = chat.get("id")
+            dedupe = chat_id if chat_id is not None else chat.get("username")
+            if dedupe in seen:
+                continue
+            seen.add(dedupe)
+            _print_chat(chat)
+
+        member = item.get("my_chat_member")
+        if member:
+            chat = member.get("chat") or {}
+            chat_id = chat.get("id")
+            if chat_id not in seen:
+                seen.add(chat_id)
+                print("(Bot was added or permissions changed)")
+                _print_chat(chat)
+
+    print(
+        "\nCopy TELEGRAM_CHAT_ID into .env.\n"
+        "Channels: use @YourChannelUsername (public) or the numeric id (e.g. -100…)."
+    )
 
 
 if __name__ == "__main__":

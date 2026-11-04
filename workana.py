@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import html
 import json
+import logging
 import re
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass, replace
 from typing import Any
 
 import httpx
+
+log = logging.getLogger(__name__)
 
 from locale_en import english_member_since, normalize_stat_label
 
@@ -211,28 +216,70 @@ DEFAULT_HEADERS = {
 }
 
 
-def _fetch_html_via_curl(jobs_url: str) -> str:
-    curl = shutil.which("curl.exe") or shutil.which("curl")
+def _curl_executable() -> str | None:
+    return shutil.which("curl.exe") or shutil.which("curl")
+
+
+def _fetch_html_via_curl(url: str, *, max_attempts: int = 3) -> str:
+    curl = _curl_executable()
     if not curl:
-        raise RuntimeError("HTTP 403 from Workana and curl is not installed.")
-    result = subprocess.run(
-        [
-            curl,
-            "-sL",
-            "-A",
-            USER_AGENT,
-            jobs_url,
-        ],
-        capture_output=True,
-        timeout=60,
-        check=False,
+        raise RuntimeError("curl is not installed.")
+
+    last_detail = "unknown error"
+    for attempt in range(max_attempts):
+        result = subprocess.run(
+            [
+                curl,
+                "-sL",
+                "--compressed",
+                "--connect-timeout",
+                "30",
+                "--max-time",
+                "60",
+                "-A",
+                USER_AGENT,
+                url,
+            ],
+            capture_output=True,
+            timeout=75,
+            check=False,
+        )
+        if result.returncode == 0:
+            text = result.stdout.decode("utf-8", errors="replace")
+            if text.strip():
+                return text
+            last_detail = "empty response body"
+        else:
+            stderr = result.stderr.decode("utf-8", errors="replace").strip()
+            last_detail = f"exit {result.returncode}"
+            if stderr:
+                last_detail = f"{last_detail} ({stderr[:200]})"
+
+        if attempt < max_attempts - 1:
+            delay = 2 * (attempt + 1)
+            log.warning(
+                "Workana curl fetch failed (%s), retry in %ss (%s/%s)",
+                last_detail,
+                delay,
+                attempt + 1,
+                max_attempts,
+            )
+            time.sleep(delay)
+
+    raise RuntimeError(
+        f"curl failed after {max_attempts} attempts ({last_detail})"
     )
-    if result.returncode != 0:
-        raise RuntimeError(f"curl failed (exit {result.returncode})")
-    text = result.stdout.decode("utf-8", errors="replace")
-    if not text.strip():
-        raise RuntimeError("curl returned an empty response from Workana.")
-    return text
+
+
+async def _fetch_html_via_httpx(url: str) -> str:
+    async with httpx.AsyncClient(
+        follow_redirects=True,
+        timeout=httpx.Timeout(45.0),
+        headers=DEFAULT_HEADERS,
+    ) as client:
+        response = await client.get(url)
+        response.raise_for_status()
+        return response.text
 
 
 def _parse_jobs_page(page_html: str) -> list[WorkanaJob]:
@@ -252,19 +299,23 @@ def _parse_jobs_page(page_html: str) -> list[WorkanaJob]:
 
 
 async def fetch_page_html(url: str) -> str:
+    if _curl_executable():
+        try:
+            return await asyncio.to_thread(_fetch_html_via_curl, url)
+        except RuntimeError as exc:
+            log.warning("curl fetch failed, falling back to httpx: %s", exc)
+
     try:
-        async with httpx.AsyncClient(
-            follow_redirects=True,
-            timeout=httpx.Timeout(45.0),
-            headers=DEFAULT_HEADERS,
-        ) as client:
-            response = await client.get(url)
-            response.raise_for_status()
-            return response.text
+        return await _fetch_html_via_httpx(url)
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code not in (403, 429):
             raise
-        return _fetch_html_via_curl(url)
+        if not _curl_executable():
+            raise RuntimeError(
+                "Workana blocked the request (HTTP "
+                f"{exc.response.status_code}). Install curl or try again later."
+            ) from exc
+        return await asyncio.to_thread(_fetch_html_via_curl, url)
 
 
 async def enrich_job_from_detail(job: WorkanaJob) -> WorkanaJob:

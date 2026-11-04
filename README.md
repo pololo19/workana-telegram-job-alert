@@ -6,10 +6,14 @@ Workana has **no public API**, so this bot reads the same public listing page yo
 
 ## Quick start
 
-1. **Telegram bot**
+1. **Telegram bot + channel**
    - Message [@BotFather](https://t.me/BotFather) → `/newbot` → copy the token.
-   - Start a chat with your bot and send any message.
-   - Get your chat ID from [@userinfobot](https://t.me/userinfobot) (or similar).
+   - Create a **Telegram channel** for job alerts.
+   - Channel → **Administrators** → add your bot → turn on **Post messages**.
+   - Post any message in the channel (so Telegram registers the bot there).
+   - Run `python get_chat_id.py` and copy the line for your channel into `.env` as `TELEGRAM_CHAT_ID` (e.g. `@my_workana_jobs` or `-1001234567890`).
+
+   The bot only **pushes** alerts into the channel; it does not reply in a private bot chat. To use your own DM instead of a channel, set `TELEGRAM_CHAT_ID` to your user id from [@userinfobot](https://t.me/userinfobot).
 
 2. **Configure**
 
@@ -29,6 +33,81 @@ Workana has **no public API**, so this bot reads the same public listing page yo
    ```
 
 4. **Keep it running** (optional): use Task Scheduler, `nssm`, or a small VPS so alerts continue when your PC is off.
+
+## Ubuntu VPS
+
+Do **not** copy the Windows `.venv` folder to the server. Upload the project (git clone, `scp`, etc.) and create a fresh venv on Linux.
+
+1. **Packages**
+
+   ```bash
+   sudo apt update
+   sudo apt install -y python3 python3-venv python3-pip curl
+   ```
+
+2. **App directory** (example)
+
+   ```bash
+   cd ~
+   git clone <your-repo-url> workana-telegram-bot   # or upload the folder
+   cd workana-telegram-bot
+   cp .env.example .env
+   nano .env   # token, TELEGRAM_CHAT_ID, WORKANA_JOBS_URL, filters
+   ```
+
+3. **Install & test**
+
+   ```bash
+   chmod +x run.sh
+   ./run.sh
+   ```
+
+   Stop with `Ctrl+C` once you see polling logs and (if configured) a test alert.
+
+4. **Run as a service** (survives reboot)
+
+   Create `/etc/systemd/system/workana-bot.service` (replace `YOUR_USER` and paths):
+
+   ```ini
+   [Unit]
+   Description=Workana Telegram job alerts
+   After=network-online.target
+   Wants=network-online.target
+
+   [Service]
+   Type=simple
+   User=YOUR_USER
+   WorkingDirectory=/home/YOUR_USER/workana-telegram-bot
+   ExecStart=/home/YOUR_USER/workana-telegram-bot/.venv/bin/python bot.py
+   Restart=on-failure
+   RestartSec=15
+   Environment=PYTHONUNBUFFERED=1
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+
+   First-time venv (if you have not run `./run.sh` yet):
+
+   ```bash
+   python3 -m venv .venv
+   .venv/bin/pip install -r requirements.txt
+   ```
+
+   Enable:
+
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now workana-bot
+   sudo systemctl status workana-bot
+   journalctl -u workana-bot -f
+   ```
+
+5. **VPS notes**
+
+   - Install **curl** (used when Workana returns 403/429).
+   - Datacenter IPs sometimes hit **Cloudflare** more often than a home connection. If logs show “Cloudflare challenge”, raise `POLL_INTERVAL_SECONDS` (e.g. 120–180) or try another region/provider.
+   - Persisted state lives in `data/seen_jobs.json` — back it up if you rebuild the VPS so you do not get duplicate “new job” floods.
 
 ## Filters
 
